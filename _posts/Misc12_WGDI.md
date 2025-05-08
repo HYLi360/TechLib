@@ -1,0 +1,514 @@
+---
+title: "杂谈12：共线性分析——WGDI"
+time: 2025-05-08
+---
+
+# 杂谈12：共线性分析——WGDI
+
+> WGDI (Whole-Genome Duplication Integrated analysis) is a Python-based command-line tool designed to simplify the analysis of whole-genome duplications (WGD) and cross-species genome alignments.
+
+> WGDI（全基因组重复整合分析）是一款基于 Python 的命令行工具，旨在简化全基因组重复（WGD）和跨物种基因组比对分析。
+
+> https://github.com/SunPengChuan/wgdi
+
+WGDI包含多种模式，例如绘制dot-plot、获取共线性参数、计算Ks值，等等。不同模式需要不同的配置文件，但是前置要求是一样的。你需要的文件包括：
+
+—blast结果（采用format 6。可以用NCBI-BLAST+，也可以用针对大规模数据优化的diamond）；
+—GFF与LEN文件（需要特定脚本实现，有格式要求）。
+
+其他参数将在后面介绍。
+
+### 预处理过程
+
+这里的GFF和LEN文件需自行生成：我们这里的GFF文件基于原本的GFF3，但结构进行了简化。原本的结构是
+
+```
+seqid	source	type	start	end	score	strand	phase	attributes
+```
+
+共9列。但是，这里需要重构一下，变成
+
+```
+seqid	attributes	start	end	strand
+```
+
+也就是第[0, 8, 3, 4, 6]列（第1、9、4、5、7列）。使用pandas库的.loc功能，可以轻松地把这一部分提取出来。
+
+然后则是精简数据信息。GFF文件包含主条目与各子条目，例如在其中一个取自Ensembl Rapid上的“两个”条目：
+
+```
+###
+1	ensembl	ncRNA_gene	749	1456	.	+	.	ID=gene:ENSFBZG00000004380;biotype=lncRNA;gene_id=ENSFBZG00000004380;version=1
+1	ensembl	lnc_RNA	749	1456	.	+	.	ID=transcript:ENSFBZT00000006931;Parent=gene:ENSFBZG00000004380;biotype=lncRNA;tag=Ensembl_canonical;transcript_id=ENSFBZT00000006931;version=1
+1	ensembl	exon	749	868	.	+	.	Parent=transcript:ENSFBZT00000006931;constitutive=0;exon_id=ENSFBZE00000031713;rank=1;version=1
+1	ensembl	exon	947	1456	.	+	.	Parent=transcript:ENSFBZT00000006931;constitutive=0;exon_id=ENSFBZE00000031716;rank=2;version=1
+###
+1	ensembl	gene	6948	8703	.	+	.	ID=gene:ENSFBZG00000000663;biotype=protein_coding;gene_id=ENSFBZG00000000663;version=1
+1	ensembl	mRNA	6948	8703	.	+	.	ID=transcript:ENSFBZT00000001038;Parent=gene:ENSFBZG00000000663;biotype=protein_coding;tag=Ensembl_canonical;transcript_id=ENSFBZT00000001038;version=1
+1	ensembl	five_prime_UTR	6948	7244	.	+	.	Parent=transcript:ENSFBZT00000001038
+1	ensembl	exon	6948	7566	.	+	.	Parent=transcript:ENSFBZT00000001038;constitutive=0;exon_id=ENSFBZE00000005188;rank=1;version=1
+1	ensembl	CDS	7245	7566	.	+	0	ID=CDS:ENSFBZP00000001038;Parent=transcript:ENSFBZT00000001038;protein_id=ENSFBZP00000001038;version=1
+1	ensembl	CDS	7841	8439	.	+	2	ID=CDS:ENSFBZP00000001038;Parent=transcript:ENSFBZT00000001038;protein_id=ENSFBZP00000001038;version=1
+1	ensembl	exon	7841	8703	.	+	.	Parent=transcript:ENSFBZT00000001038;constitutive=0;exon_id=ENSFBZE00000005190;rank=2;version=1
+1	ensembl	three_prime_UTR	8440	8703	.	+	.	Parent=transcript:ENSFBZT00000001038
+###
+```
+
+是的，这并非是“12个”条目，而是两个——ensembl很智能，它把不同的主条目用###行隔开。在这里，每个条目的第一行就是我们要找的“主条目”了。我们只需要gene就好，另一个是ncRNA_gene，它不编码蛋白质，所以在这里并没有用。
+
+目标已经明确——找到每一个标gene的行，然后提取出来。
+
+```python
+# 读取GFF3（实际上是按照TSV——也就是CSV的comma换成了tab——组织起来的数据）
+data = pd.read_csv(args.input, sep="\t", header=None, skiprows=0)
+# 只读取带“gene”的几行
+data = data[data[2] == 'gene']
+```
+
+还差什么呢？哦，对了——第九列（现在的第2列）仍然需要清理一下！现在第2列的内容，差不多是这个样子：
+
+```
+ID=gene:ENSFBZG00000000663;biotype=protein_coding;gene_id=ENSFBZG00000000663;version=1
+```
+
+只需要最开头的gene:ENSFBZG00000000663做标识符就行了呢。先用split，根据分号和冒号隔开，然后......
+
+```python
+data[8] = data[8].str.split(";|:", "", expand=True)[1]
+```
+
+最后写回就行了呢。
+
+```python
+data.to_csv(args.output, sep="\t", header=None, index=False)
+```
+
+大概的感觉就是这样：
+
+```bash
+python3 1_getgff.py --input Genome.gff3 --output Genome_Simp.gff --type gene
+```
+
+这里的 Genome_Simp.gff 就包含这个基因组里全部基因的位置信息了。
+
+我们还可以借此机会，获得染色体长度与基因数量的信息。我们再稍微改造一下。
+
+```python
+# 生成 LENS
+data[0] = data[0].astype(str).str.strip()
+lens = data.groupby(0).agg({4: 'max', 8: 'count'}).reset_index()
+```
+
+现在，我们需要的3个文件，已经搞定了两个。还差个blastp的结果——可是蛋白质组数据的问题，还没有解决！
+
+有人会说，获取蛋白质数据，我们完全可以用gffread来实现嘛！这确实可行，但实际上，很可能会发生各种异常情况。
+
+例如，每一个蛋白质条目变成了转录本，基因与蛋白质的对应关系消失了（特别常见于ensembl版的gff）：
+
+```
+> transcript:ENSWHXT00000003709
+```
+
+另一种，基因已知，但分成了若干转录本（一般课题组自己获得的就是这种）：
+
+```
+> g11.t1
+> g11.t2
+```
+
+我们显然不希望发生这两种情况。好在这俩其实从根本上是同一个问题——如果一个基因条目关联到多个转录本，如何选择？我们在习惯上更加倾向于选择更长的转录本作为代表。例如这种：
+
+```
+###
+1	ensembl	gene	123687	127517	.	+	.	ID=gene:ENSWHXG00000001281...
+1	ensembl	mRNA	123687	127124	.	+	.	ID=transcript:ENSWHXT00000002004...
+1	ensembl	five_prime_UTR	123687	123766	.	+	.	Parent=transcript:ENSWHXT00000002004...
+1	ensembl	exon	123687	124332	.	+	.	Parent=transcript:ENSWHXT00000002004...
+1	ensembl	CDS	123767	124332	.	+	0	ID=CDS:ENSWHXP00000002004...
+1	ensembl	exon	124433	124766	.	+	.	Parent=transcript:ENSWHXT00000002004...
+1	ensembl	CDS	124433	124766	.	+	1	ID=CDS:ENSWHXP00000002004...
+1	ensembl	exon	124974	125247	.	+	.	Parent=transcript:ENSWHXT00000002004...
+1	ensembl	CDS	124974	125247	.	+	0	ID=CDS:ENSWHXP00000002004...
+1	ensembl	CDS	125767	126125	.	+	2	ID=CDS:ENSWHXP00000002004...
+1	ensembl	exon	125767	127124	.	+	.	Parent=transcript:ENSWHXT00000002004...
+1	ensembl	three_prime_UTR	126126	127124	.	+	.	Parent=transcript:ENSWHXT00000002004...
+1	ensembl	mRNA	123687	127517	.	+	.	ID=transcript:ENSWHXT00000002017...
+1	ensembl	five_prime_UTR	123687	123766	.	+	.	Parent=transcript:ENSWHXT00000002017...
+1	ensembl	exon	123687	124332	.	+	.	Parent=transcript:ENSWHXT00000002017...
+1	ensembl	CDS	123767	124332	.	+	0	ID=CDS:ENSWHXP00000002017...
+1	ensembl	exon	124433	124766	.	+	.	Parent=transcript:ENSWHXT00000002017...
+1	ensembl	CDS	124433	124766	.	+	1	ID=CDS:ENSWHXP00000002017...
+1	ensembl	exon	124974	125247	.	+	.	Parent=transcript:ENSWHXT00000002017...
+1	ensembl	CDS	124974	125247	.	+	0	ID=CDS:ENSWHXP00000002017...
+1	ensembl	exon	125767	125948	.	+	.	Parent=transcript:ENSWHXT00000002017...
+1	ensembl	CDS	125767	125948	.	+	2	ID=CDS:ENSWHXP00000002017...
+1	ensembl	CDS	126507	126518	.	+	0	ID=CDS:ENSWHXP00000002017...
+1	ensembl	exon	126507	127517	.	+	.	Parent=transcript:ENSWHXT00000002017...
+1	ensembl	three_prime_UTR	126519	127517	.	+	.	Parent=transcript:ENSWHXT00000002017...
+###
+```
+
+看上去很复杂，但稍微精简一下，大概结构就一目了然：
+
+```
+###
+1	gene	123687	127517	.	+	gene:ENSWHXG00000001281
+1	mRNA	123687	127124	.	+	transcript:ENSWHXT00000002004
+1	CDS	123767	124332	.	+
+1	CDS	124433	124766	.	+
+1	CDS	124974	125247	.	+
+1	CDS	125767	126125	.	+
+1	mRNA	123687	127517	.	+	transcript:ENSWHXT00000002017
+1	CDS	123767	124332	.	+
+1	CDS	124433	124766	.	+
+1	CDS	124974	125247	.	+
+1	CDS	125767	125948	.	+
+1	CDS	126507	126518	.	+
+###
+```
+
+很明显，一个gene带了两个transcript。怎么做呢？将它们做差再求和，然后取CDS最长的那个版本。
+
+```
+transcript:ENSWHXT00000002004
+124332-123767 = 565
+124766-124433 = 333
+125247-124974 = 273
+126125-125767 = 358
+sum = 1529
+
+transcript:ENSWHXT00000002017
+124332-123767 = 565
+124766-124433 = 333
+125247-124974 = 273
+125948-125767 = 181
+126518-126507 = 11
+sum = 1363
+```
+
+此时ENSWHXG00000001281对应的“唯一”转录本为ENSWHXT00000002004。我们首先要记住这个对应关系，然后将这个转录本“抽”出来，最后还要把转录本的名字换成基因的名字。——这可能吗？
+
+完全不用担心！......不过过程显然要比上一个脚本复杂一些。整理一下思路，我们首先要找到每个基因当中CDS最长的那个转录本，然后用这个转录本从基因组中翻译出蛋白质序列，最后用基因的名字命名序列。
+
+同样的，我们还是要请pandas，来帮我们组织一下数据。我们的流程是——
+
+> 利用mRNA做第一次"遍历", 建立基因->转录本的关系（虽然看上去是“遍历”，但其实是每一行同时进行处理）。
+> 利用CDS做第二次"遍历", 获得转录本CDS长度。
+> 通过公共项“转录本名称”合并1和2的结果，然后，通过选择CDS最长的转录本，形成转录本->基因一一对应的关系（字典）。
+> 最后，在gffread的结果里：
+>  1，删掉字典里没有出现的转录本；
+>  2，将转录本名字换成基因名字。
+
+具体流程可以参考第二个文件 2_get_prot.py。
+
+> [!NOTE]
+>
+> 两个预处理脚本的使用说明
+>
+> ```
+> WGDI Pre-Process Step-1
+> usage: 1_get_gff_len.py [-h] --input INPUT --outgff OUTGFF --outlens OUTLENS --type TYPE [--chrrm CHRRM] [--chradd CHRADD]
+> 
+> WGDI Pre-Process Step-1: Get GFF Files.
+> 
+> options:
+> -h, --help         show this help message and exit
+> --input INPUT      Input GFF3 file name.
+> --outgff OUTGFF    Output simplified GFF file name.
+> --outlens OUTLENS  Output simplified LEN file name.
+> --type TYPE        Entrie type.
+> --chrrm CHRRM      Optional. Remove the content on First (Chr) column.
+> --chradd CHRADD    Optional. Add the content on head of First (Chr) column.
+> ```
+>
+> ```
+> WGDI Pre-Process Step-2
+> usage: 2_get_prot.py [-h] --ingff INGFF --infna INFNA --outfaa OUTFAA
+> 
+> WGDI Pre-Process Step-2: Get Protein FASTA Files.
+> 
+> options:
+> -h, --help       show this help message and exit
+> --ingff INGFF    Input GFF3 file name.
+> --infna INFNA    Input FASTA(Genome) file name.
+> --outfaa OUTFAA  Output FASTA(Protein) file name.
+> ```
+
+至此，大部分命令所需的全部文件已经集齐。
+
+### 正式的数据处理过程
+
+WGDI功能非常丰富，它可以通过不同类型的配置文件，实现不同的功能：
+
+> -d：dot-plot，做同源基因点图，可作为文献插图使用。
+> -icl：collinearity，获得共线性结果，本质是改进版的ColinearScan。进一步分析时可以利用。
+> -ks：通过 YN00 方法计算同源基因对的 Ka/Ks。
+> -bi：blockinfo，将共线性与Ks结果合并到一起。
+
+这里我们跑一下-d和-icl。
+
+```
+# dotplot.conf
+[dotplot]
+blast = blast file # blast
+blast_reverse = false
+gff1 =  gff1 file # gff用脚本1获取
+gff2 =  gff2 file
+lens1 = lens1 file # 同上
+lens2 = lens2 file
+genome1_name =  Genome1 name
+genome2_name =  Genome2 name
+multiple  = 1 # 最好同源的个数(用红色表示)，不清楚就写1
+score = 100
+evalue = 1e-5
+repeat_number = 10 # 基因相对另一个基因组同源基因的数量限制
+position = order # 与end相比，end的点图相对比较集中。
+blast_reverse = false # 比对中基因对顺序是否翻转,
+ancestor_left = none # 点图左侧物种的祖先染色体区域
+ancestor_top = none # 点图顶部物种的祖先染色体区域
+markersize = 0.5 # 调整图中点的大小
+figsize = 10,10 # 保存图片大小比例
+savefig = savefile(.svg,.png,.pdf) # 类型： 默认： *.PNG保存图片支持png、pdf、svg格式
+
+```
+
+之后再 `wgdi -d dotplot.conf`，等待出图。
+
+```
+# coll.conf
+[collinearity]
+blast = blast file
+blast_reverse = false
+gff1 = gff1 file
+gff2 = gff2 file
+lens1 = lens1 file
+lens2 = lens2 file
+multiple = 1
+process = 8
+evalue = 1e-5
+score = 100
+grading = 50,40,25
+mg = 40,40
+pvalue = 0.2
+repeat_number = 10
+positon = order
+savefile = collinearity file # 输出文件，需自行命名
+
+```
+
+可以看到前6项都是一致的。
+
+然后，执行`wgdi -icl coll.conf`。结果大概是这个样子（MCScanX风格）：
+
+```
+# Alignment 1: score=401 pvalue=0.1706 N=15 ped_chr001&Chr01 plus
+g1362 1242 Pfi01G025700 2570 1
+g1363 1243 Pfi01G025830 2583 -1
+g1385 1262 Pfi01G025960 2596 1
+g1401 1276 Pfi01G026040 2604 -1
+g1434 1306 Pfi01G026060 2606 1
+g1435 1307 Pfi01G026080 2608 1
+g1451 1322 Pfi01G026310 2631 1
+g1452 1323 Pfi01G026320 2632 1
+g1457 1328 Pfi01G026350 2635 1
+g1460 1330 Pfi01G026380 2638 1
+g1465 1334 Pfi01G026400 2640 1
+g1466 1335 Pfi01G026440 2644 1
+g1470 1339 Pfi01G026460 2646 1
+g1485 1354 Pfi01G026700 2670 1
+g1492 1360 Pfi01G026710 2671 1
+# Alignment 2: score=383 pvalue=0.0002 N=8 ped_chr001&Chr01 plus
+g634 586 Pfi01G036910 3691 1
+g635 587 Pfi01G036920 3692 1
+g636 588 Pfi01G036940 3694 1
+g637 589 Pfi01G036960 3696 1
+g638 590 Pfi01G036970 3697 1
+g639 591 Pfi01G036980 3698 -1
+g640 592 Pfi01G036990 3699 -1
+g641 593 Pfi01G037010 3701 -1
+```
+
+
+
+> [!NOTE]
+>
+> 一点点的Q&A
+>
+> Q：如果Chr顺序不太对，或者名称太长互相叠叠乐，咋办？
+> A：可以直接动len文件，修改染色体顺序。但名字不能改动，因为它跟`simp.gff`是联动的，必须保证这俩的染色体名称一致。可以在第一个脚本里的`--chrrm`或者`--chradd`参数里调整Chr的格式，具体可以看上面的Note。
+>
+> Q：右侧和下方有很多Chr叠在一起，很不好看？
+> A：可以直接在`.len`文件里，删掉基因数量非常少的，没有组装到染色体上的Chr，然后再重新作图。
+>
+> Q：接下来该如何做？例如美化共线性结果？或者针对某个基因座进行更精细的共线性分析？
+> A：这部分推荐交给`jcvi`，或者TBtools-II，然后从 `-icl` 的结果开始处理。具体过程可以看第13话。
+
+### 附录
+
+最后，附上这两个脚本的源代码，各位可以随意取用，或者进一步改进。这些代码是我在做本科毕设的共线性分析时写的，非常感谢编写WGDI的大佬提供的原始预处理代码。
+
+```python
+"""
+WGDI Pre-Process Step-1
+
+以下预处理代码改进自原 WGDI 项目。
+使用前请确认在python环境中是否安装了 pandas 和 argparse。
+
+WGDI项目的GitHub主页: https://github.com/SunPengChuan/wgdi?tab=readme-ov-file
+相关论文: https://doi.org/10.1016/j.molp.2022.10.018
+
+Written by HYLi360, 2025/5/3
+"""
+
+import argparse
+import pandas as pd
+
+def main():
+    print()
+    print("WGDI Pre-Process \033[94mStep-1\033[0m")
+
+    # receive args/接受参数
+    parser = argparse.ArgumentParser(description="WGDI Pre-Process Step-1: Get GFF Files.")
+    
+    parser.add_argument('--input', required=True, help='Input GFF3 file name.')
+    parser.add_argument('--outgff', required=True, help='Output simplified GFF file name.')
+    parser.add_argument('--outlens', required=True, help='Output simplified LEN file name.')
+    parser.add_argument('--type', required=True, help='Entrie type.')
+
+    parser.add_argument('--chrrm', required=False, help='Optional. Remove the content on First (Chr) column.')
+
+    args = parser.parse_args()
+
+    # main process logic/主处理逻辑
+    print(f"\033[94mProcessing\033[0m [{args.input}] >>> [{args.outgff}, {args.outlens}]")
+
+    # generate/生成 GFF
+    data = pd.read_csv(args.input, sep="\t", header=None, skiprows=0, comment='#')
+    data = data[data[2] == args.type]
+    data = data.loc[:, [0, 8, 3, 4, 6]]
+    data[8] = data[8].str.split('=|;|\|',expand=True)[1]
+    data['order'] = data.groupby(0).cumcount() + 1
+
+    if args.chrrm is not None:
+        data[0] = data[0].str.replace(args.chrrm,'',regex=True)
+
+    print(f"\033[94mWriting\033[0m to {args.outgff}...")
+    data.to_csv(args.outgff, sep="\t", header=None, index=False)
+
+    print(data)
+
+    # generate/生成 LENS
+    print(f"\033[94mCalculating\033[0m chromosome lengths and gene counts...")
+    data[0] = data[0].astype(str).str.strip()
+    lens = data.groupby(0).agg({4: 'max', 8: 'count'}).reset_index()
+    print(f"\033[94mWriting\033[0m to {args.outlens}...")
+    lens.to_csv(args.outlens, sep="\t", header=False, index=False)
+
+    print("\033[92mPre-Process Step-1 Complete!\033[0m")
+    print()
+
+if __name__ == "__main__":
+    main()
+
+```
+
+```python
+"""
+WGDI Pre-Process Step-2
+
+以下预处理代码改进自原 WGDI 项目。
+使用前请确认是否安装了 gffread,
+在 Python 环境中安装了 argparse、re、pandas 与 BioPython。
+
+WGDI项目的GitHub主页: https://github.com/SunPengChuan/wgdi?tab=readme-ov-file
+相关论文: https://doi.org/10.1016/j.molp.2022.10.018
+
+Written by HYLi360, 2025/5/3
+"""
+
+import argparse
+import re
+import subprocess
+import pandas as pd
+from Bio import SeqIO
+
+from collections import defaultdict
+
+# 主程序
+def main():
+    print()
+    print("WGDI Pre-Process \033[94mStep-2\033[0m")
+
+    # receive args/接受参数
+    parser = argparse.ArgumentParser(description="WGDI Pre-Process Step-2: Get Protein FASTA Files.")
+    
+    parser.add_argument('--ingff', required=True, help='Input GFF3 file name.')
+    parser.add_argument('--infna', required=True, help='Input FASTA(Genome) file name.')
+    parser.add_argument('--outfaa', required=True, help='Output FASTA(Protein) file name.')
+
+    args = parser.parse_args()
+
+    # main logic/主逻辑
+    data = pd.read_csv(args.ingff, sep="\t", header=None, skiprows=0, comment='#')
+    mrna_data = data[data[2] == "mRNA"]
+    cds_data = data[data[2] == "CDS"]
+
+    # 利用mRNA做第一次"遍历", 建立基因->转录本的关系
+    print(f"\033[94mAnalysing\033[0m make dictionary for gene to transcript...")
+    attributes_list = list(mrna_data[8])
+    gene_to_transcripts = defaultdict(list)
+    pattern = r"ID=([^;]+);Parent=([^;]+)"
+
+    for i in attributes_list:
+        match = re.search(pattern, i)
+        if match:
+            gene_to_transcripts[match.group(2)].append(match.group(1))
+    
+    g2t_df = pd.DataFrame([(gene, transcript) for gene, transcripts in gene_to_transcripts.items() for transcript in transcripts], columns= ['gene', 'transcript'])
+    
+    # 利用CDS做第二次"遍历", 获得转录本CDS长度
+    print(f"\033[94mAnalysing\033[0m calculating transcript CDS length...")
+    cds_data = cds_data.loc[:, [8, 3, 4]]
+
+    cds_data.columns = ['transcript', 'start', 'end']
+
+    cds_data.loc[:, 'transcript'] = cds_data['transcript'].str.split('=|;|\|',expand=True)[3]
+    cds_data.loc[:, 'length'] = cds_data['end'] - cds_data['start'] + 1
+    cds_length_df = cds_data.groupby('transcript')['length'].sum().reset_index()
+
+    print(f"\033[94mAnalysing\033[0m search the longest CDS...")
+    # 将结果1套用到结果2
+    transcript_table = pd.merge(g2t_df, cds_length_df, on='transcript')
+    transcript_table = transcript_table.loc[:, ['gene', 'transcript', 'length']]
+    
+    # 选择CDS总长最大的组合
+    transcript_table_filtered = transcript_table.loc[transcript_table.groupby('gene')['length'].idxmax()]
+
+    print(f"\033[94mAnalysing\033[0m collate result...")
+    # 生成干净的字典
+    trans2gene = dict(zip(transcript_table_filtered['transcript'], transcript_table_filtered['gene']))
+
+    # 开始提取序列
+    print(f"\033[94mProcessing\033[0m [{args.ingff}, {args.infna}] >>> [{args.outfaa}]")
+    command = f"gffread {args.ingff} -g {args.infna} -y {args.outfaa}"
+    subprocess.run(command, shell=True)
+
+    # 对生成的序列进行筛选
+    filtered_records = [
+        record for record in SeqIO.parse(args.outfaa, "fasta") if record.id in list(transcript_table_filtered['transcript'])
+    ]
+
+    for record in filtered_records:
+        record.id = trans2gene[record.id]
+        record.description = ""
+    
+    SeqIO.write(filtered_records, args.outfaa, "fasta")
+    
+    print("\033[92mPre-Process Step-2 Complete!\033[0m")
+    print()
+
+if __name__ == "__main__":
+    main()
+
+```
+
