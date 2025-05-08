@@ -1,6 +1,7 @@
 ---
 title: "TechLib by HYLi360"
 layout: default
+markdown: kramdown
 # Index page
 ---
 
