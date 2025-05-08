@@ -4,4 +4,4 @@ layout: default
 # Index page
 ---
 
-- [misc 12](/_posts/Misc12_WGDI.md)
+- [misc 12]({% post_url 2025-05-08-Misc12_WGDI %})
