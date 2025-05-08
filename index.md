@@ -1,5 +1,5 @@
 ---
 title: "TechLib by HYLi360"
-layout: default
+layout: home
 # Index page
 ---
